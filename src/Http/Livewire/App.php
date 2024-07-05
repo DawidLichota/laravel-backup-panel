@@ -2,20 +2,23 @@
 
 namespace PavelMironchik\LaravelBackupPanel\Http\Livewire;
 
-use Illuminate\Http\Response;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Validator;
-use Illuminate\Validation\ValidationException;
 use Livewire\Component;
-use PavelMironchik\LaravelBackupPanel\Jobs\CreateBackupJob;
-use PavelMironchik\LaravelBackupPanel\Rules\BackupDisk;
-use PavelMironchik\LaravelBackupPanel\Rules\PathToZip;
-use Spatie\Backup\BackupDestination\Backup;
-use Spatie\Backup\BackupDestination\BackupDestination;
+use Livewire\Attributes\On;
+use Illuminate\Http\Response;
 use Spatie\Backup\Helpers\Format;
-use Spatie\Backup\Tasks\Monitor\BackupDestinationStatus;
-use Spatie\Backup\Tasks\Monitor\BackupDestinationStatusFactory;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
+use Spatie\Backup\BackupDestination\Backup;
+use Illuminate\Validation\ValidationException;
+use PavelMironchik\LaravelBackupPanel\Rules\PathToZip;
+use Spatie\Backup\BackupDestination\BackupDestination;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use PavelMironchik\LaravelBackupPanel\Rules\BackupDisk;
+use Spatie\Backup\Tasks\Monitor\BackupDestinationStatus;
+use PavelMironchik\LaravelBackupPanel\Jobs\CreateBackupJob;
+use Spatie\Backup\BackupDestination\BackupDestinationFactory;
+use Spatie\Backup\Tasks\Monitor\BackupDestinationStatusFactory;
 
 class App extends Component
 {
@@ -32,24 +35,23 @@ class App extends Component
     public function updateBackupStatuses()
     {
         $this->backupStatuses = Cache::remember('backup-statuses', now()->addSeconds(4), function () {
-            return BackupDestinationStatusFactory::createForMonitorConfig(config('backup.monitor_backups'))
-                ->map(function (BackupDestinationStatus $backupDestinationStatus) {
-                    return [
-                        'name' => $backupDestinationStatus->backupDestination()->backupName(),
-                        'disk' => $backupDestinationStatus->backupDestination()->diskName(),
-                        'reachable' => $backupDestinationStatus->backupDestination()->isReachable(),
-                        'healthy' => $backupDestinationStatus->isHealthy(),
-                        'amount' => $backupDestinationStatus->backupDestination()->backups()->count(),
-                        'newest' => $backupDestinationStatus->backupDestination()->newestBackup()
-                            ? $backupDestinationStatus->backupDestination()->newestBackup()->date()->diffForHumans()
-                            : 'No backups present',
-                        'usedStorage' => Format::humanReadableSize($backupDestinationStatus->backupDestination()->usedStorage()),
-                    ];
-                })
-                ->values()
-                ->toArray();
+            $monitoredBackupConfig = \Spatie\Backup\Config\MonitoredBackupsConfig::fromArray(config('backup.monitor_backups'));
+            return BackupDestinationStatusFactory::createForMonitorConfig($monitoredBackupConfig)->map(function (BackupDestinationStatus $backupDestinationStatus){
+                $destination = $backupDestinationStatus->backupDestination();
+                return [
+                    'name' => $destination->backupName(),
+                    'disk' => $destination->diskName(),
+                    'reachable' => $destination->isReachable(),
+                    'healthy' => $backupDestinationStatus->isHealthy(),
+                    'amount' => $destination->backups()->count(),
+                    'newest' => $destination->newestBackup()
+                        ? $backupDestinationStatus->backupDestination()->newestBackup()->date()->diffForHumans()
+                        : 'No backups present',
+                    'usedStorage' => Format::humanReadableSize($backupDestinationStatus->backupDestination()->usedStorage()),
+                ];
+            })->all();
         });
-
+            
         if (! $this->activeDisk and count($this->backupStatuses)) {
             $this->activeDisk = $this->backupStatuses[0]['disk'];
         }
@@ -60,17 +62,17 @@ class App extends Component
             })
             ->values()
             ->all();
-
-        $this->emitSelf('backupStatusesUpdated');
+        $this->dispatch('backupStatusesUpdated');
     }
 
+    #[On('backupStatusesUpdated')]
     public function getFiles(string $disk = '')
     {
         if ($disk) {
             $this->activeDisk = $disk;
         }
 
-        $this->validateActiveDisk();
+        $this->validateActiveDisk();  
 
         $backupDestination = BackupDestination::create($this->activeDisk, config('backup.backup.name'));
 
@@ -79,7 +81,6 @@ class App extends Component
                 ->backups()
                 ->map(function (Backup $backup) {
                     $size = method_exists($backup, 'sizeInBytes') ? $backup->sizeInBytes() : $backup->size();
-
                     return [
                         'path' => $backup->path(),
                         'date' => $backup->date()->format('Y-m-d H:i:s'),
@@ -94,7 +95,7 @@ class App extends Component
     {
         $this->deletingFile = $this->files[$fileIndex];
 
-        $this->emitSelf('showDeleteModal');
+        $this->dispatch('showDeleteModal');
     }
 
     public function deleteFile()
@@ -102,7 +103,7 @@ class App extends Component
         $deletingFile = $this->deletingFile;
         $this->deletingFile = null;
 
-        $this->emitSelf('hideDeleteModal');
+        $this->dispatch('hideDeleteModal');
 
         $this->validateActiveDisk();
         $this->validateFilePath($deletingFile ? $deletingFile['path'] : '');
@@ -179,6 +180,20 @@ class App extends Component
         return view('laravel_backup_panel::livewire.app');
     }
 
+    public function funBackup($option = ''){
+        $this->js("        
+            Toastify({
+                text: 'Creating a new backup in the background... ($option)',
+                duration: 5000,
+                gravity: 'bottom',
+                position: 'right',
+                backgroundColor: '#1fb16e',
+                className: 'toastify-custom',
+            }).showToast()
+        ");
+        $this->createBackup($option);
+    }
+
     protected function validateActiveDisk()
     {
         try {
@@ -193,7 +208,7 @@ class App extends Component
             )->validate();
         } catch (ValidationException $e) {
             $message = $e->validator->errors()->get('activeDisk')[0];
-            $this->emitSelf('showErrorToast', $message);
+            $this->dispatch('showErrorToast', $message);
 
             throw $e;
         }
@@ -213,7 +228,7 @@ class App extends Component
             )->validate();
         } catch (ValidationException $e) {
             $message = $e->validator->errors()->get('file')[0];
-            $this->emitSelf('showErrorToast', $message);
+            $this->dispatch('showErrorToast', $message);
 
             throw $e;
         }
